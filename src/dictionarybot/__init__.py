@@ -1,0 +1,1 @@
+"""AI dictionary Telegram bot."""
