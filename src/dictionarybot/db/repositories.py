@@ -96,6 +96,10 @@ class UserRepository:
         user.association_style = style
         await self.session.flush()
 
+    async def set_fsrs_retention(self, user: User, retention: float) -> None:
+        user.fsrs_retention = retention
+        await self.session.flush()
+
 
 class CardRepository:
     def __init__(self, session: AsyncSession, fsrs: FsrsService) -> None:
@@ -230,6 +234,21 @@ class CardRepository:
         result = await self.session.execute(query)
         return list(result.all())
 
+    async def random_cards(self, user_id: int, mode: str, limit: int) -> list[Card]:
+        query: Select[tuple[Card]] = (
+            select(Card)
+            .where(Card.user_id == user_id)
+            .order_by(func.random())
+            .limit(limit)
+        )
+        if mode == ASSOCIATION_MODE:
+            query = query.where(
+                Card.association_enabled.is_(True),
+                Card.association_text.is_not(None),
+            )
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
     async def list_cards(self, user_id: int, limit: int = 10, offset: int = 0) -> list[Card]:
         result = await self.session.execute(
             select(Card)
@@ -260,6 +279,33 @@ class CardRepository:
         )
         return list(result.scalars().all())
 
+    async def latest_review_ratings(
+        self,
+        user_id: int,
+        card_ids: list[int],
+        mode: str,
+    ) -> dict[int, int]:
+        if not card_ids:
+            return {}
+
+        latest_reviews = (
+            select(ReviewLog.card_id, func.max(ReviewLog.id).label("latest_review_id"))
+            .where(
+                ReviewLog.user_id == user_id,
+                ReviewLog.card_id.in_(card_ids),
+                ReviewLog.mode == mode,
+            )
+            .group_by(ReviewLog.card_id)
+            .subquery()
+        )
+        result = await self.session.execute(
+            select(ReviewLog.card_id, ReviewLog.rating).join(
+                latest_reviews,
+                ReviewLog.id == latest_reviews.c.latest_review_id,
+            )
+        )
+        return {card_id: rating for card_id, rating in result.all()}
+
     async def count_cards(self, user_id: int) -> int:
         count = await self.session.scalar(
             select(func.count(Card.id)).where(Card.user_id == user_id)
@@ -276,10 +322,17 @@ class CardRepository:
         )
         return count or 0
 
-    async def review_card(self, user: User, card: Card, mode: str, rating_key: str) -> ReviewLog:
+    async def review_card(
+        self,
+        user: User,
+        card: Card,
+        mode: str,
+        rating_key: str,
+        desired_retention: float = 0.9,
+    ) -> ReviewLog:
         state = await self.ensure_fsrs_state(card, mode)
         previous_due = state.due_at
-        review = self.fsrs.review(state.fsrs_card_json, rating_key)
+        review = self.fsrs.review(state.fsrs_card_json, rating_key, desired_retention)
         state.fsrs_card_json = review.card_json
         state.due_at = review.next_due_at
         state.last_reviewed_at = review.reviewed_at

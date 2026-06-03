@@ -7,8 +7,10 @@ from aiogram.types import (
 )
 
 BTN_ADD = "➕ Добавить"
-BTN_REVIEW = "🔁 Повторение"
-BTN_ASSOC_REVIEW = "🧠 Ассоциации"
+BTN_REVIEW = "🔁 Повторение FSRS"
+BTN_ASSOC_REVIEW = "🧠 Ассоциации FSRS"
+BTN_REVIEW_RANDOM = "🎲 Повторение рандом"
+BTN_ASSOC_RANDOM = "🎲 Ассоциации рандом"
 BTN_IMPORT = "📥 Импорт"
 BTN_DICTIONARY = "📚 Словарь"
 BTN_SETTINGS = "⚙️ Настройки"
@@ -42,8 +44,9 @@ def menu_only() -> InlineKeyboardMarkup:
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_REVIEW)],
-            [KeyboardButton(text=BTN_ASSOC_REVIEW), KeyboardButton(text=BTN_IMPORT)],
+            [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_IMPORT)],
+            [KeyboardButton(text=BTN_REVIEW), KeyboardButton(text=BTN_ASSOC_REVIEW)],
+            [KeyboardButton(text=BTN_REVIEW_RANDOM), KeyboardButton(text=BTN_ASSOC_RANDOM)],
             [KeyboardButton(text=BTN_DICTIONARY), KeyboardButton(text=BTN_SETTINGS)],
         ],
         resize_keyboard=True,
@@ -61,11 +64,15 @@ def start_inline_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="➕ Добавить", callback_data="menu:add"),
-                InlineKeyboardButton(text="🔁 Повторение", callback_data="menu:review"),
+                InlineKeyboardButton(text="📥 Импорт", callback_data="menu:import"),
             ],
             [
-                InlineKeyboardButton(text="🧠 Ассоциации", callback_data="menu:assoc_review"),
-                InlineKeyboardButton(text="📥 Импорт", callback_data="menu:import"),
+                InlineKeyboardButton(text=BTN_REVIEW, callback_data="menu:review"),
+                InlineKeyboardButton(text=BTN_ASSOC_REVIEW, callback_data="menu:assoc_review"),
+            ],
+            [
+                InlineKeyboardButton(text=BTN_REVIEW_RANDOM, callback_data="menu:review_random"),
+                InlineKeyboardButton(text=BTN_ASSOC_RANDOM, callback_data="menu:assoc_random"),
             ],
             [
                 InlineKeyboardButton(text="📚 Словарь", callback_data="menu:dictionary"),
@@ -285,7 +292,17 @@ def fsrs_rating() -> InlineKeyboardMarkup:
     )
 
 
-def settings_menu(current_style: str) -> InlineKeyboardMarkup:
+def settings_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧠 Стиль ассоциаций", callback_data="settings:assoc")],
+            [InlineKeyboardButton(text="🔁 Режим FSRS", callback_data="settings:fsrs")],
+            [menu_button()],
+        ]
+    )
+
+
+def settings_association_menu(current_style: str) -> InlineKeyboardMarkup:
     labels = {
         "neutral": "Нейтральный",
         "funny": "Забавный",
@@ -297,25 +314,54 @@ def settings_menu(current_style: str) -> InlineKeyboardMarkup:
         rows.append(
             [InlineKeyboardButton(text=f"{marker}{label}", callback_data=f"settings:style:{style}")]
         )
+    rows.append([InlineKeyboardButton(text="↩️ Настройки", callback_data="settings:back")])
+    rows.append([menu_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def settings_fsrs_menu(current_retention: float) -> InlineKeyboardMarkup:
+    labels = {
+        0.85: "85% Легкий",
+        0.90: "90% Баланс",
+        0.95: "95% Интенсивный",
+    }
+    rows = []
+    for retention, label in labels.items():
+        marker = "✅ " if round(current_retention, 2) == retention else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{marker}{label}",
+                    callback_data=f"settings:retention:{retention}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="↩️ Настройки", callback_data="settings:back")])
     rows.append([menu_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def dictionary_cards(
-    cards: list[tuple[int, str]],
+    cards: list[tuple[int, str, int | None]],
     offset: int,
     total: int,
     page_size: int = 10,
     search: bool = False,
 ) -> InlineKeyboardMarkup:
+    fsrs_markers = {
+        1: "🔴",
+        2: "🟠",
+        3: "🟡",
+        4: "🟢",
+    }
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{offset + idx}. {title[:34]} ✏️",
+                text=f"{offset + idx}. {title[:34]} {fsrs_markers.get(rating, '⚪️')}",
                 callback_data=f"dict:edit:{card_id}:{offset}:{int(search)}",
             )
         ]
-        for idx, (card_id, title) in enumerate(cards, start=1)
+        for idx, (card_id, title, rating) in enumerate(cards, start=1)
     ]
     previous_offset = max(offset - page_size, 0)
     next_offset = offset + page_size

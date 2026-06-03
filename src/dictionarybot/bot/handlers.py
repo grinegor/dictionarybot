@@ -1,3 +1,4 @@
+import asyncio
 import html
 import re
 from contextlib import suppress
@@ -32,10 +33,17 @@ router = Router()
 fsrs = FsrsService()
 _settings: Settings | None = None
 DICTIONARY_PAGE_SIZE = 10
+NORMAL_RANDOM_MODE = "normal_random"
+ASSOCIATION_RANDOM_MODE = "association_random"
+REVIEW_MODES = {NORMAL_MODE, ASSOCIATION_MODE, NORMAL_RANDOM_MODE, ASSOCIATION_RANDOM_MODE}
+RANDOM_REVIEW_MODES = {NORMAL_RANDOM_MODE, ASSOCIATION_RANDOM_MODE}
+ASSOCIATION_REVIEW_MODES = {ASSOCIATION_MODE, ASSOCIATION_RANDOM_MODE}
 NAVIGATION_TRIGGERS = {
     kb.BTN_ADD,
     kb.BTN_REVIEW,
     kb.BTN_ASSOC_REVIEW,
+    kb.BTN_REVIEW_RANDOM,
+    kb.BTN_ASSOC_RANDOM,
     kb.BTN_IMPORT,
     kb.BTN_DICTIONARY,
     kb.BTN_SETTINGS,
@@ -43,6 +51,8 @@ NAVIGATION_TRIGGERS = {
     "/add",
     "/review",
     "/assoc",
+    "/review_random",
+    "/assoc_random",
     "/import",
     "/dictionary",
     "/settings",
@@ -74,8 +84,19 @@ async def _setup_commands(bot: Bot) -> None:
         [
             BotCommand(command="start", description="🏠 Главное меню"),
             BotCommand(command="add", description="➕ Добавить"),
-            BotCommand(command="review", description="🔁 EN -> RU"),
-            BotCommand(command="assoc", description="🧠 RU + Ассоциация -> EN"),
+            BotCommand(command="review", description="🔁 Повторение FSRS (EN -> RU)"),
+            BotCommand(
+                command="assoc",
+                description="🧠 Ассоциации FSRS (RU + Ассоциация -> EN)",
+            ),
+            BotCommand(
+                command="review_random",
+                description="🎲 Повторение рандом (EN -> RU)",
+            ),
+            BotCommand(
+                command="assoc_random",
+                description="🎲 Ассоциации рандом (RU + Ассоциация -> EN)",
+            ),
             BotCommand(command="import", description="📥 Импорт"),
             BotCommand(command="settings", description="⚙️ Настройки"),
             BotCommand(command="dictionary", description="📚 Словарь"),
@@ -108,6 +129,10 @@ async def menu_callbacks(
         await ask_review_size(callback.message, NORMAL_MODE, edit=True)
     elif action == "assoc_review":
         await ask_review_size(callback.message, ASSOCIATION_MODE, edit=True)
+    elif action == "review_random":
+        await ask_review_size(callback.message, NORMAL_RANDOM_MODE, edit=True)
+    elif action == "assoc_random":
+        await ask_review_size(callback.message, ASSOCIATION_RANDOM_MODE, edit=True)
     elif action == "settings":
         await show_settings(callback.message, app_user, edit=True)
     elif action == "dictionary":
@@ -134,6 +159,10 @@ async def navigation_trigger(
         await ask_review_size(message, NORMAL_MODE)
     elif text in {kb.BTN_ASSOC_REVIEW, "/assoc"}:
         await ask_review_size(message, ASSOCIATION_MODE)
+    elif text in {kb.BTN_REVIEW_RANDOM, "/review_random"}:
+        await ask_review_size(message, NORMAL_RANDOM_MODE)
+    elif text in {kb.BTN_ASSOC_RANDOM, "/assoc_random"}:
+        await ask_review_size(message, ASSOCIATION_RANDOM_MODE)
     elif text in {kb.BTN_IMPORT, "/import"}:
         await begin_import(message, state)
     elif text in {kb.BTN_DICTIONARY, "/dictionary"}:
@@ -203,10 +232,11 @@ async def add_card_input(
         service = OpenAIService(settings)
     except RuntimeError:
         await state.set_state(AddCardStates.waiting_ru_manual)
-        await message.answer(
+        prompt = await message.answer(
             "OpenAI API не настроен. Напиши перевод вручную.",
             reply_markup=kb.menu_only(),
         )
+        await state.update_data(translation_flow_message_id=prompt.message_id)
         return
 
     thinking = await message.answer("Перевожу через OpenAI...")
@@ -222,6 +252,7 @@ async def add_card_input(
             error_message=str(exc),
         )
         await state.set_state(AddCardStates.waiting_ru_manual)
+        await state.update_data(translation_flow_message_id=thinking.message_id)
         await thinking.edit_text(
             "Не получилось перевести автоматически. Напиши перевод вручную.",
             reply_markup=kb.menu_only(),
@@ -246,15 +277,26 @@ async def add_translation_ok(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "add:translation_manual")
 async def add_translation_manual(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddCardStates.waiting_ru_manual)
-    await callback.message.answer("✍️ Напиши перевод на русском.", reply_markup=kb.menu_only())
+    await state.update_data(translation_flow_message_id=callback.message.message_id)
+    await callback.message.edit_text("✍️ Напиши перевод на русском.", reply_markup=kb.menu_only())
     await callback.answer()
 
 
 @router.message(AddCardStates.waiting_ru_manual)
 async def add_ru_manual(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
     await state.update_data(pending_ru=clean_text(message.text or ""))
     await state.set_state(None)
-    await ask_association(message)
+    flow_message_id = data.get("translation_flow_message_id")
+    if flow_message_id is not None:
+        await message.bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=flow_message_id,
+            text="🧠 Добавить ассоциацию к карточке?",
+            reply_markup=kb.association_choice(),
+        )
+    else:
+        await ask_association(message)
 
 
 async def ask_association(message: Message, edit: bool = False) -> None:
@@ -847,15 +889,90 @@ async def assoc_review_entry(message: Message, state: FSMContext) -> None:
     await ask_review_size(message, ASSOCIATION_MODE)
 
 
+@router.message(F.text.in_({kb.BTN_REVIEW_RANDOM, "/review_random"}))
+@router.message(Command("review_random"))
+async def review_random_entry(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await ask_review_size(message, NORMAL_RANDOM_MODE)
+
+
+@router.message(F.text.in_({kb.BTN_ASSOC_RANDOM, "/assoc_random"}))
+@router.message(Command("assoc_random"))
+async def assoc_random_entry(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await ask_review_size(message, ASSOCIATION_RANDOM_MODE)
+
+
 async def ask_review_size(message: Message, mode: str, edit: bool = False) -> None:
-    if mode == NORMAL_MODE:
-        text = "🔁 <b>Повторение</b>\n\nСколько карточек взять для обычной тренировки?"
-    else:
-        text = "🧠 <b>Ассоциации</b>\n\nСколько карточек взять для тренировки по ассоциациям?"
+    text = review_size_text(mode)
     if edit:
         await message.edit_text(text, reply_markup=kb.review_size(mode))
     else:
         await message.answer(text, reply_markup=kb.review_size(mode))
+
+
+def review_size_text(mode: str) -> str:
+    title = review_mode_title(mode)
+    direction = review_mode_direction(mode)
+    text = f"{title} <b>({direction})</b>\n\nСколько карточек взять?"
+    if is_random_review_mode(mode):
+        text += (
+            "\n\nОценки Again / Hard / Good / Easy только переключают карточки "
+            "и не влияют на будущие подборы."
+        )
+    return text
+
+
+def review_mode_title(mode: str) -> str:
+    labels = {
+        NORMAL_MODE: "🔁 <b>Повторение FSRS</b>",
+        ASSOCIATION_MODE: "🧠 <b>Ассоциации FSRS</b>",
+        NORMAL_RANDOM_MODE: "🎲 <b>Повторение рандом</b>",
+        ASSOCIATION_RANDOM_MODE: "🎲 <b>Ассоциации рандом</b>",
+    }
+    return labels.get(mode, "🔁 <b>Повторение</b>")
+
+
+def review_mode_direction(mode: str) -> str:
+    if is_association_review_mode(mode):
+        return "RU + Ассоциация -> EN"
+    return "EN -> RU"
+
+
+def empty_review_text(mode: str) -> str:
+    if is_random_review_mode(mode):
+        if is_association_review_mode(mode):
+            return "Пока нет карточек с ассоциациями для случайной тренировки."
+        return "Пока нет карточек для случайной тренировки."
+    return "На сейчас нет карточек к повторению."
+
+
+async def review_cards(
+    session: AsyncSession,
+    user_id: int,
+    mode: str,
+    limit: int,
+) -> list[Card]:
+    repo = CardRepository(session, fsrs)
+    base_mode = review_base_mode(mode)
+    if is_random_review_mode(mode):
+        return await repo.random_cards(user_id, base_mode, limit)
+    due = await repo.due_cards(user_id, base_mode, limit)
+    return [card for card, _state in due]
+
+
+def review_base_mode(mode: str) -> str:
+    if is_association_review_mode(mode):
+        return ASSOCIATION_MODE
+    return NORMAL_MODE
+
+
+def is_association_review_mode(mode: str) -> bool:
+    return mode in ASSOCIATION_REVIEW_MODES
+
+
+def is_random_review_mode(mode: str) -> bool:
+    return mode in RANDOM_REVIEW_MODES
 
 
 @router.callback_query(F.data.startswith("review:start:"))
@@ -866,10 +983,13 @@ async def review_start(
     app_user: User,
 ) -> None:
     _, _, mode, limit_text = callback.data.split(":")
-    due = await CardRepository(session, fsrs).due_cards(app_user.id, mode, int(limit_text))
-    if not due:
+    if mode not in REVIEW_MODES:
+        await callback.answer("Неизвестный режим", show_alert=True)
+        return
+    cards = await review_cards(session, app_user.id, mode, int(limit_text))
+    if not cards:
         await callback.message.edit_text(
-            "На сейчас нет карточек к повторению.",
+            empty_review_text(mode),
             reply_markup=kb.menu_only(),
         )
         await callback.answer()
@@ -877,7 +997,7 @@ async def review_start(
     await state.set_state(ReviewStates.reviewing)
     await state.update_data(
         review_mode=mode,
-        review_queue=[card.id for card, _state in due],
+        review_queue=[card.id for card in cards],
         review_index=0,
     )
     await callback.message.edit_reply_markup(reply_markup=None)
@@ -946,11 +1066,6 @@ async def show_review_answer(
         await send_main_menu(message, disable_notification=True)
         return False
     if data.get("review_stage") == "answer":
-        await message.answer(
-            "Перевод уже открыт. Поставь оценку кнопкой ниже.",
-            reply_markup=kb.review_rating_keyboard(),
-            disable_notification=True,
-        )
         return False
     card = await CardRepository(session, fsrs).get_by_id(app_user.id, int(data["current_card_id"]))
     if not card:
@@ -960,8 +1075,8 @@ async def show_review_answer(
             disable_notification=True,
         )
         return False
-    mode = data["review_mode"]
-    if mode == NORMAL_MODE:
+    mode = str(data["review_mode"])
+    if not is_association_review_mode(mode):
         answer = f"🇷🇺 <b>{e(card.ru_text)}</b>"
     else:
         answer = f"🇬🇧 <b>{e(card.en_text)}</b>"
@@ -984,8 +1099,10 @@ async def review_rate(
     app_user: User,
 ) -> None:
     rating = callback.data.rsplit(":", 1)[1]
+    data = await state.get_data()
+    is_random = is_random_review_mode(str(data.get("review_mode", "")))
     saved = await rate_review_card(callback.message, state, session, app_user, rating)
-    await callback.answer("Оценка сохранена" if saved else None)
+    await callback.answer("Оценка сохранена" if saved and not is_random else None)
 
 
 @router.message(ReviewStates.reviewing, F.text.in_(set(kb.RATING_BUTTON_TO_KEY)))
@@ -1026,9 +1143,17 @@ async def rate_review_card(
             disable_notification=True,
         )
         return False
-    repo = CardRepository(session, fsrs)
-    await repo.review_card(app_user, card, data["review_mode"], rating)
-    await session.commit()
+    mode = str(data["review_mode"])
+    if not is_random_review_mode(mode):
+        repo = CardRepository(session, fsrs)
+        await repo.review_card(
+            app_user,
+            card,
+            review_base_mode(mode),
+            rating,
+            desired_retention=app_user.fsrs_retention,
+        )
+        await session.commit()
     await state.update_data(review_index=int(data["review_index"]) + 1)
     await send_review_front(message, state, session, app_user)
     return True
@@ -1059,15 +1184,37 @@ async def settings_entry(message: Message, state: FSMContext, app_user: User) ->
 
 
 async def show_settings(message: Message, app_user: User, edit: bool = False) -> None:
-    labels = {"neutral": "нейтральный", "funny": "забавный", "absurd": "абсурдный"}
-    text = (
-        "⚙️ <b>Настройки</b>\n\n"
-        f"Стиль ассоциаций: <b>{labels.get(app_user.association_style)}</b>"
-    )
+    text = settings_text(app_user.association_style, app_user.fsrs_retention)
     if edit:
-        await message.edit_text(text, reply_markup=kb.settings_menu(app_user.association_style))
+        await message.edit_text(text, reply_markup=kb.settings_menu())
     else:
-        await message.answer(text, reply_markup=kb.settings_menu(app_user.association_style))
+        await message.answer(text, reply_markup=kb.settings_menu())
+
+
+def settings_text(association_style: str, fsrs_retention: float) -> str:
+    return (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"🧠 Ассоциации: <b>{association_style_label(association_style)}</b>\n"
+        f"🔁 FSRS: <b>{retention_label(fsrs_retention)}</b>"
+    )
+
+
+@router.callback_query(F.data == "settings:back")
+async def settings_back(callback: CallbackQuery, app_user: User) -> None:
+    await callback.message.edit_text(
+        settings_text(app_user.association_style, app_user.fsrs_retention),
+        reply_markup=kb.settings_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings:assoc")
+async def settings_assoc(callback: CallbackQuery, app_user: User) -> None:
+    await callback.message.edit_text(
+        association_settings_text(app_user.association_style),
+        reply_markup=kb.settings_association_menu(app_user.association_style),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("settings:style:"))
@@ -1080,12 +1227,88 @@ async def settings_style(
     if style not in {"neutral", "funny", "absurd"}:
         await callback.answer("Неизвестный стиль", show_alert=True)
         return
+    if app_user.association_style == style:
+        await callback.answer("Уже выбран")
+        return
     await UserRepository(session, current_settings().admin_tg_ids).set_association_style(
         app_user,
         style,  # type: ignore[arg-type]
     )
-    await callback.message.answer("✅ Стиль ассоциаций обновлен.")
+    await callback.message.edit_text(
+        association_settings_text(style),
+        reply_markup=kb.settings_association_menu(style),
+    )
+    await callback.answer("Стиль обновлен")
+
+
+@router.callback_query(F.data == "settings:fsrs")
+async def settings_fsrs(callback: CallbackQuery, app_user: User) -> None:
+    await callback.message.edit_text(
+        fsrs_settings_text(app_user.fsrs_retention),
+        reply_markup=kb.settings_fsrs_menu(app_user.fsrs_retention),
+    )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("settings:retention:"))
+async def settings_retention(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    app_user: User,
+) -> None:
+    retention = float(callback.data.rsplit(":", 1)[1])
+    if retention not in {0.85, 0.90, 0.95}:
+        await callback.answer("Неизвестный режим", show_alert=True)
+        return
+    if round(app_user.fsrs_retention, 2) == retention:
+        await callback.answer("Уже выбран")
+        return
+    await UserRepository(session, current_settings().admin_tg_ids).set_fsrs_retention(
+        app_user,
+        retention,
+    )
+    await callback.message.edit_text(
+        fsrs_settings_text(retention),
+        reply_markup=kb.settings_fsrs_menu(retention),
+    )
+    await callback.answer("FSRS обновлен")
+
+
+def association_style_label(style: str) -> str:
+    labels = {"neutral": "нейтральный", "funny": "забавный", "absurd": "абсурдный"}
+    return labels.get(style, style)
+
+
+def association_settings_text(style: str) -> str:
+    return (
+        "🧠 <b>Стиль ассоциаций</b>\n\n"
+        "Выбери тон генерации.\n\n"
+        f"Сейчас: <b>{association_style_label(style)}</b>"
+    )
+
+
+def fsrs_settings_text(retention: float) -> str:
+    return (
+        "🔁 <b>FSRS retention</b>\n\n"
+        "Выбери частоту повторений.\n\n"
+        "85% — легче, интервалы длиннее\n"
+        "90% — баланс нагрузки\n"
+        "95% — чаще, память крепче\n\n"
+        f"Сейчас: <b>{retention_label(retention)}</b>"
+    )
+
+
+def retention_label(retention: float) -> str:
+    labels = {
+        0.85: "85% легкий",
+        0.90: "90% баланс",
+        0.95: "95% интенсивный",
+    }
+    return labels.get(round(retention, 2), f"{retention_percent(retention)}%")
+
+
+def retention_percent(retention: float) -> int:
+    return round(retention * 100)
 
 
 @router.message(F.text.in_({kb.BTN_DICTIONARY, "/dictionary"}))
@@ -1252,8 +1475,13 @@ async def render_dictionary_page(
     if not total:
         text += f"\n\n{empty_text}"
 
+    ratings = await repo.latest_review_ratings(
+        app_user.id,
+        [card.id for card in cards],
+        mode=NORMAL_MODE,
+    )
     markup = kb.dictionary_cards(
-        [(card.id, card.en_text) for card in cards],
+        [(card.id, card.en_text, ratings.get(card.id)) for card in cards],
         offset=normalized_offset,
         total=total,
         page_size=DICTIONARY_PAGE_SIZE,
@@ -1746,7 +1974,7 @@ def format_card(card: Card) -> str:
 
 
 def format_review_front(card: Card, mode: str) -> str:
-    if mode == NORMAL_MODE:
+    if not is_association_review_mode(mode):
         return f"🇬🇧 <b>{e(card.en_text)}</b>"
     return f"🇷🇺 <b>{e(card.ru_text)}</b>\n🧠 {e(card.association_text or '')}"
 
@@ -1799,6 +2027,7 @@ async def clear_reply_keyboard(message: Message, disable_notification: bool = Fa
         reply_markup=kb.remove_reply_keyboard(),
         disable_notification=disable_notification,
     )
+    await asyncio.sleep(0.35)
     with suppress(TelegramAPIError):
         await keyboard_reset.delete()
 

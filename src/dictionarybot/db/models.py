@@ -30,6 +30,7 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     association_style: Mapped[str] = mapped_column(String(32), default="funny")
+    fsrs_retention: Mapped[float] = mapped_column(Float, default=0.9, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
