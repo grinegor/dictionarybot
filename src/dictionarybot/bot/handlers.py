@@ -84,18 +84,15 @@ async def _setup_commands(bot: Bot) -> None:
         [
             BotCommand(command="start", description="🏠 Главное меню"),
             BotCommand(command="add", description="➕ Добавить"),
-            BotCommand(command="review", description="🔁 Повторение FSRS (EN -> RU)"),
-            BotCommand(
-                command="assoc",
-                description="🧠 Ассоциации FSRS (RU + Ассоциация -> EN)",
-            ),
+            BotCommand(command="review", description="🔁 Повторение"),
+            BotCommand(command="assoc", description="🧠 Ассоциации"),
             BotCommand(
                 command="review_random",
-                description="🎲 Повторение рандом (EN -> RU)",
+                description="🎲 Повторение рандом",
             ),
             BotCommand(
                 command="assoc_random",
-                description="🎲 Ассоциации рандом (RU + Ассоциация -> EN)",
+                description="🎲 Ассоциации рандом",
             ),
             BotCommand(command="import", description="📥 Импорт"),
             BotCommand(command="settings", description="⚙️ Настройки"),
@@ -107,8 +104,9 @@ async def _setup_commands(bot: Bot) -> None:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext, app_user: User) -> None:
+    review_was_active = await is_review_state(state)
     await state.clear()
-    await send_main_menu(message)
+    await send_main_menu(message, reset_reply_keyboard=review_was_active)
 
 
 @router.callback_query(F.data.startswith("menu:"))
@@ -119,15 +117,21 @@ async def menu_callbacks(
     app_user: User,
 ) -> None:
     action = callback.data.split(":", 1)[1]
+    review_was_active = await is_review_state(state)
     await state.clear()
-    await clear_reply_keyboard(callback.message, disable_notification=True)
+    if review_was_active:
+        await clear_reply_keyboard(callback.message, disable_notification=True)
     if action == "home":
         await callback.message.edit_text(main_menu_text(), reply_markup=kb.start_inline_menu())
     elif action == "add":
         await begin_add(callback.message, state, edit=True)
     elif action == "review":
+        await show_review_mode_menu(callback.message, "normal", edit=True)
+    elif action == "review_fsrs":
         await ask_review_size(callback.message, NORMAL_MODE, edit=True)
     elif action == "assoc_review":
+        await show_review_mode_menu(callback.message, "association", edit=True)
+    elif action == "assoc_fsrs":
         await ask_review_size(callback.message, ASSOCIATION_MODE, edit=True)
     elif action == "review_random":
         await ask_review_size(callback.message, NORMAL_RANDOM_MODE, edit=True)
@@ -149,16 +153,17 @@ async def navigation_trigger(
     session: AsyncSession,
     app_user: User,
 ) -> None:
+    review_was_active = await is_review_state(state)
     await state.clear()
     text = message.text
-    if text != kb.BTN_MENU:
+    if review_was_active:
         await clear_reply_keyboard(message, disable_notification=True)
     if text in {kb.BTN_ADD, "/add"}:
         await begin_add(message, state)
     elif text in {kb.BTN_REVIEW, "/review"}:
-        await ask_review_size(message, NORMAL_MODE)
+        await show_review_mode_menu(message, "normal")
     elif text in {kb.BTN_ASSOC_REVIEW, "/assoc"}:
-        await ask_review_size(message, ASSOCIATION_MODE)
+        await show_review_mode_menu(message, "association")
     elif text in {kb.BTN_REVIEW_RANDOM, "/review_random"}:
         await ask_review_size(message, NORMAL_RANDOM_MODE)
     elif text in {kb.BTN_ASSOC_RANDOM, "/assoc_random"}:
@@ -879,14 +884,14 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(Command("review"))
 async def review_entry(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await ask_review_size(message, NORMAL_MODE)
+    await show_review_mode_menu(message, "normal")
 
 
 @router.message(F.text.in_({kb.BTN_ASSOC_REVIEW, "/assoc"}))
 @router.message(Command("assoc"))
 async def assoc_review_entry(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await ask_review_size(message, ASSOCIATION_MODE)
+    await show_review_mode_menu(message, "association")
 
 
 @router.message(F.text.in_({kb.BTN_REVIEW_RANDOM, "/review_random"}))
@@ -903,6 +908,25 @@ async def assoc_random_entry(message: Message, state: FSMContext) -> None:
     await ask_review_size(message, ASSOCIATION_RANDOM_MODE)
 
 
+async def show_review_mode_menu(message: Message, kind: str, edit: bool = False) -> None:
+    if kind == "association":
+        text = (
+            "🧠 <b>Ассоциации</b>\n\n"
+            "FSRS — умный подбор по расписанию.\n"
+            "Рандом — случайные карточки без влияния на FSRS."
+        )
+    else:
+        text = (
+            "🔁 <b>Повторение</b>\n\n"
+            "FSRS — умный подбор по расписанию.\n"
+            "Рандом — случайные карточки без влияния на FSRS."
+        )
+    if edit:
+        await message.edit_text(text, reply_markup=kb.review_mode_menu(kind))
+    else:
+        await message.answer(text, reply_markup=kb.review_mode_menu(kind))
+
+
 async def ask_review_size(message: Message, mode: str, edit: bool = False) -> None:
     text = review_size_text(mode)
     if edit:
@@ -913,8 +937,7 @@ async def ask_review_size(message: Message, mode: str, edit: bool = False) -> No
 
 def review_size_text(mode: str) -> str:
     title = review_mode_title(mode)
-    direction = review_mode_direction(mode)
-    text = f"{title} <b>({direction})</b>\n\nСколько карточек взять?"
+    text = f"{title}\n\nСколько карточек взять?"
     if is_random_review_mode(mode):
         text += (
             "\n\nОценки Again / Hard / Good / Easy только переключают карточки "
@@ -931,12 +954,6 @@ def review_mode_title(mode: str) -> str:
         ASSOCIATION_RANDOM_MODE: "🎲 <b>Ассоциации рандом</b>",
     }
     return labels.get(mode, "🔁 <b>Повторение</b>")
-
-
-def review_mode_direction(mode: str) -> str:
-    if is_association_review_mode(mode):
-        return "RU + Ассоциация -> EN"
-    return "EN -> RU"
 
 
 def empty_review_text(mode: str) -> str:
@@ -1016,7 +1033,7 @@ async def send_review_front(
     idx = data["review_index"]
     if idx >= len(queue):
         await state.clear()
-        await send_main_menu(message, disable_notification=True)
+        await send_main_menu(message, disable_notification=True, reset_reply_keyboard=True)
         return
     card = await CardRepository(session, fsrs).get_by_id(app_user.id, int(queue[idx]))
     if not card:
@@ -2012,8 +2029,17 @@ def current_settings() -> Settings:
     return _settings
 
 
-async def send_main_menu(message: Message, disable_notification: bool = False) -> None:
-    await clear_reply_keyboard(message, disable_notification=disable_notification)
+async def is_review_state(state: FSMContext) -> bool:
+    return await state.get_state() == ReviewStates.reviewing.state
+
+
+async def send_main_menu(
+    message: Message,
+    disable_notification: bool = False,
+    reset_reply_keyboard: bool = False,
+) -> None:
+    if reset_reply_keyboard:
+        await clear_reply_keyboard(message, disable_notification=disable_notification)
     await message.answer(
         main_menu_text(),
         reply_markup=kb.start_inline_menu(),

@@ -7,8 +7,8 @@ from aiogram.types import (
 )
 
 BTN_ADD = "➕ Добавить"
-BTN_REVIEW = "🔁 Повторение FSRS"
-BTN_ASSOC_REVIEW = "🧠 Ассоциации FSRS"
+BTN_REVIEW = "🔁 Повторение"
+BTN_ASSOC_REVIEW = "🧠 Ассоциации"
 BTN_REVIEW_RANDOM = "🎲 Повторение рандом"
 BTN_ASSOC_RANDOM = "🎲 Ассоциации рандом"
 BTN_IMPORT = "📥 Импорт"
@@ -46,7 +46,6 @@ def main_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_IMPORT)],
             [KeyboardButton(text=BTN_REVIEW), KeyboardButton(text=BTN_ASSOC_REVIEW)],
-            [KeyboardButton(text=BTN_REVIEW_RANDOM), KeyboardButton(text=BTN_ASSOC_RANDOM)],
             [KeyboardButton(text=BTN_DICTIONARY), KeyboardButton(text=BTN_SETTINGS)],
         ],
         resize_keyboard=True,
@@ -71,13 +70,31 @@ def start_inline_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=BTN_ASSOC_REVIEW, callback_data="menu:assoc_review"),
             ],
             [
-                InlineKeyboardButton(text=BTN_REVIEW_RANDOM, callback_data="menu:review_random"),
-                InlineKeyboardButton(text=BTN_ASSOC_RANDOM, callback_data="menu:assoc_random"),
-            ],
-            [
                 InlineKeyboardButton(text="📚 Словарь", callback_data="menu:dictionary"),
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
             ],
+        ]
+    )
+
+
+def review_mode_menu(kind: str) -> InlineKeyboardMarkup:
+    if kind == "association":
+        fsrs_text = "🧠 FSRS"
+        random_text = "🎲 Рандом"
+        fsrs_callback = "menu:assoc_fsrs"
+        random_callback = "menu:assoc_random"
+    else:
+        fsrs_text = "🔁 FSRS"
+        random_text = "🎲 Рандом"
+        fsrs_callback = "menu:review_fsrs"
+        random_callback = "menu:review_random"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=fsrs_text, callback_data=fsrs_callback),
+                InlineKeyboardButton(text=random_text, callback_data=random_callback),
+            ],
+            [menu_button()],
         ]
     )
 
