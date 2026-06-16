@@ -5,7 +5,7 @@ from contextlib import suppress
 from io import BytesIO
 
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BotCommand, CallbackQuery, Message
@@ -931,7 +931,7 @@ async def show_review_mode_menu(message: Message, kind: str, edit: bool = False)
 async def ask_review_size(message: Message, mode: str, edit: bool = False) -> None:
     text = review_size_text(mode)
     if edit:
-        await message.edit_text(text, reply_markup=kb.review_size(mode))
+        await safe_edit_text(message, text, reply_markup=kb.review_size(mode))
     else:
         await message.answer(text, reply_markup=kb.review_size(mode))
 
@@ -2013,6 +2013,14 @@ def format_import_result(created: int, skipped_items: list[tuple[str, str]]) -> 
         if hidden_count > 0:
             lines.append(f"...и еще {hidden_count}.")
     return "\n".join(lines)
+
+
+async def safe_edit_text(message: Message, text: str, reply_markup: object | None = None) -> None:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
 
 
 def format_card(card: Card) -> str:
