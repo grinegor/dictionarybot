@@ -1,37 +1,37 @@
 # DictionaryBot MVP
 
-Telegram AI-словарь с карточками EN -> RU, ассоциациями через OpenAI и FSRS-повторением.
+Telegram AI dictionary with EN -> RU flashcards, OpenAI-powered associations, and FSRS reviews.
 
-## Что уже заложено
+## What's Included
 
-- Один словарь на пользователя внутри общей базы.
-- Allow list по Telegram ID.
-- Карточки: английский текст, русский перевод, опциональная ассоциация.
-- Два независимых FSRS-режима для одной карточки:
-  - обычный: EN -> RU;
-  - ассоциативный: RU + association -> EN.
-- Два random-режима для свободной тренировки:
-  - обычный: EN -> RU;
-  - ассоциативный: RU + association -> EN.
-  - оценки в random-режимах не меняют будущие FSRS-подборы.
+- One personal dictionary per user inside a shared database.
+- Telegram ID allow list.
+- Cards with English text, Russian translation, and an optional association.
+- Two independent FSRS modes for the same card:
+  - regular: EN -> RU;
+  - associative: RU + association -> EN.
+- Two random modes for free practice:
+  - regular: EN -> RU;
+  - associative: RU + association -> EN.
+  - ratings in random modes do not affect future FSRS selections.
 - OpenAI-only MVP:
-  - перевод слова;
-  - парсинг импорта;
-  - генерация 3 ассоциаций за раз.
-- Личные настройки стиля ассоциаций:
-  - нейтральный;
-  - забавный;
-  - абсурдный.
-- Личный режим FSRS retention:
-  - 85% легкий;
-  - 90% баланс;
-  - 95% интенсивный.
-- Админ-команды:
+  - word translation;
+  - import parsing;
+  - generation of 3 association variants at a time.
+- Personal association style settings:
+  - neutral;
+  - funny;
+  - absurd.
+- Personal FSRS retention mode:
+  - 85% light;
+  - 90% balanced;
+  - 95% intensive.
+- Admin commands:
   - `/allow 123456789`;
   - `/deny 123456789`;
   - `/stats`.
 
-## Локальный запуск
+## Local Setup
 
 ```bash
 python3 -m venv .venv
@@ -40,44 +40,44 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-Заполни `.env`:
+Fill in `.env`:
 
 ```env
 BOT_TOKEN=...
-ADMIN_TG_IDS=твой_telegram_id
+ADMIN_TG_IDS=your_telegram_id
 OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-5.4-mini
 OPENAI_REASONING_EFFORT=medium
 OPENAI_VERBOSITY=low
 ```
 
-По умолчанию используется локальная SQLite-база:
+By default, the bot uses a local SQLite database:
 
 ```env
 DATABASE_URL=sqlite+aiosqlite:///./dictionarybot.db
 ```
 
-Для PostgreSQL позже:
+For PostgreSQL later:
 
 ```env
 DATABASE_URL=postgresql+asyncpg://dictionarybot:password@localhost:5432/dictionarybot
 ```
 
-Запуск:
+Run:
 
 ```bash
 dictionarybot
 ```
 
-или:
+or:
 
 ```bash
 python -m dictionarybot.main
 ```
 
-## OpenAI-настройки
+## OpenAI Settings
 
-Все серверные настройки живут в `.env`. Модель не хардкодится в логике.
+All server-side settings live in `.env`. The model is not hardcoded in the application logic.
 
 ```env
 OPENAI_MODEL=gpt-5.4-mini
@@ -100,31 +100,31 @@ OPENAI_ASSOCIATION_VERBOSITY=low
 OPENAI_ASSOCIATION_VARIANTS=3
 ```
 
-Для оценки стоимости в `/stats` можно добавить тарифы:
+To estimate costs in `/stats`, you can add pricing values:
 
 ```env
 OPENAI_INPUT_USD_PER_1M_TOKENS=
 OPENAI_OUTPUT_USD_PER_1M_TOKENS=
 ```
 
-Если тарифы пустые, бот считает вызовы и токены, но не оценивает стоимость.
+If pricing values are empty, the bot tracks calls and token usage but does not estimate cost.
 
-## Основной UX
+## Main UX
 
-- `/start` или нижнее меню.
-- `➕ Добавить`: слово или пара `word - перевод`.
-- Если слово уже есть, бот показывает старую карточку и предлагает редактировать.
-- При добавлении можно:
-  - не добавлять ассоциацию;
-  - написать свою;
-  - сгенерировать 3 варианта через OpenAI.
-- `🔁 Повторение`: выбор FSRS или рандом-режима для EN -> RU.
-- `🧠 Ассоциации`: выбор FSRS или рандом-режима для RU + ассоциация -> EN.
-- `📥 Импорт`: принимает текст до 100 слов за раз или файл `.xml`/`.pdf`/`.txt` до 1 МБ, показывает превью, пользователь подтверждает или исправляет вручную.
-- `📚 Словарь`: список всех карточек с поиском и редактированием.
-- `⚙️ Настройки`: стиль ассоциаций и режим FSRS retention.
+- `/start` or the bottom menu.
+- `➕ Add`: a word or a `word - translation` pair.
+- If the word already exists, the bot shows the existing card and offers editing.
+- When adding a card, the user can:
+  - skip the association;
+  - write a custom association;
+  - generate 3 variants through OpenAI.
+- `🔁 Review`: choose FSRS or random mode for EN -> RU.
+- `🧠 Associations`: choose FSRS or random mode for RU + association -> EN.
+- `📥 Import`: accepts text up to 100 words at a time or a `.xml`/`.pdf`/`.txt` file up to 1 MB, shows a preview, and lets the user confirm or fix items manually.
+- `📚 Dictionary`: list all cards with search and editing.
+- `⚙️ Settings`: association style and FSRS retention mode.
 
-## Тесты
+## Tests
 
 ```bash
 pytest
