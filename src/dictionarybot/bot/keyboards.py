@@ -419,3 +419,12 @@ def import_confirm() -> InlineKeyboardMarkup:
             [menu_button()],
         ]
     )
+
+
+def import_done_actions() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📥 Импортировать еще", callback_data="menu:import")],
+            [menu_button()],
+        ]
+    )

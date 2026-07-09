@@ -34,6 +34,7 @@ fsrs = FsrsService()
 _settings: Settings | None = None
 DICTIONARY_PAGE_SIZE = 10
 REVIEW_LOCKS: dict[int, asyncio.Lock] = {}
+IMPORT_SKIP_DETAILS_LIMIT = 12
 NORMAL_RANDOM_MODE = "normal_random"
 ASSOCIATION_RANDOM_MODE = "association_random"
 REVIEW_MODES = {NORMAL_MODE, ASSOCIATION_MODE, NORMAL_RANDOM_MODE, ASSOCIATION_RANDOM_MODE}
@@ -1755,21 +1756,21 @@ async def import_confirm(
     data = await state.get_data()
     repo = CardRepository(session, fsrs)
     created = 0
-    skipped = 0
+    skipped_items: list[tuple[str, str]] = []
     for item in data.get("import_cards", []):
-        if not item["ru"]:
-            skipped += 1
+        en_text = clean_text(item.get("en") or "")
+        ru_text = clean_text(item.get("ru") or "")
+        if not ru_text:
+            skipped_items.append((en_text or "без английского слова", "нет перевода"))
             continue
-        result = await repo.create_card(app_user, item["en"], item["ru"])
+        result = await repo.create_card(app_user, en_text, ru_text)
         if result.created:
             created += 1
         else:
-            skipped += 1
+            skipped_items.append((result.card.en_text, "уже есть в словаре"))
     await state.clear()
-    await callback.message.edit_text(
-        f"✅ Импорт завершен.\nДобавлено: {created}\nПропущено: {skipped}",
-        reply_markup=kb.menu_only(),
-    )
+    text = format_import_result(created, skipped_items)
+    await callback.message.edit_text(text, reply_markup=kb.import_done_actions())
     await callback.answer()
 
 
@@ -1791,25 +1792,31 @@ async def import_manual_pairs(
     session: AsyncSession,
     app_user: User,
 ) -> None:
-    pairs = [parse_pair(line) for line in (message.text or "").splitlines()]
-    pairs = [pair for pair in pairs if pair is not None]
+    lines = [clean_text(line) for line in (message.text or "").splitlines() if clean_text(line)]
+    pairs = []
+    skipped_items: list[tuple[str, str]] = []
+    for line in lines:
+        pair = parse_pair(line)
+        if pair is None:
+            skipped_items.append((line, "не удалось разобрать пару"))
+            continue
+        pairs.append(pair)
     if not pairs:
         await message.answer("Не увидел пар. Формат: <code>word - перевод</code>")
         await delete_technical_input(message)
         return
     repo = CardRepository(session, fsrs)
     created = 0
-    skipped = 0
     for en_text, ru_text in pairs:
         result = await repo.create_card(app_user, en_text, ru_text)
         if result.created:
             created += 1
         else:
-            skipped += 1
+            skipped_items.append((result.card.en_text, "уже есть в словаре"))
     await state.clear()
     await message.answer(
-        f"✅ Импорт завершен.\nДобавлено: {created}\nПропущено: {skipped}",
-        reply_markup=kb.menu_only(),
+        format_import_result(created, skipped_items),
+        reply_markup=kb.import_done_actions(),
     )
     await delete_technical_input(message)
 
@@ -2015,6 +2022,27 @@ def deduplicate_candidates(candidates: list[ImportCandidate]) -> list[ImportCand
         seen.add(key)
         result.append(candidate)
     return result
+
+
+def format_import_result(created: int, skipped_items: list[tuple[str, str]]) -> str:
+    skipped_count = len(skipped_items)
+    lines = [
+        "✅ Импорт завершен.",
+        f"Добавлено: {created}",
+        f"Пропущено: {skipped_count}",
+    ]
+    if skipped_items:
+        lines.append("")
+        lines.append("Почему пропущено:")
+        for idx, (word, reason) in enumerate(
+            skipped_items[:IMPORT_SKIP_DETAILS_LIMIT],
+            start=1,
+        ):
+            lines.append(f"{idx}. <b>{e(word)}</b> — {e(reason)}")
+        hidden_count = skipped_count - IMPORT_SKIP_DETAILS_LIMIT
+        if hidden_count > 0:
+            lines.append(f"...и еще {hidden_count}.")
+    return "\n".join(lines)
 
 
 def format_card(card: Card) -> str:
