@@ -5,7 +5,7 @@ from contextlib import suppress
 from io import BytesIO
 
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BotCommand, CallbackQuery, Message
@@ -33,6 +33,7 @@ router = Router()
 fsrs = FsrsService()
 _settings: Settings | None = None
 DICTIONARY_PAGE_SIZE = 10
+REVIEW_LOCKS: dict[int, asyncio.Lock] = {}
 IMPORT_SKIP_DETAILS_LIMIT = 12
 NORMAL_RANDOM_MODE = "normal_random"
 ASSOCIATION_RANDOM_MODE = "association_random"
@@ -220,16 +221,19 @@ async def add_card_input(
         if existing:
             await show_duplicate(message, existing)
             await state.clear()
+            await delete_technical_input(message)
             return
         await state.update_data(pending_en=en_text, pending_ru=ru_text)
         await state.set_state(None)
         await ask_association(message)
+        await delete_technical_input(message)
         return
 
     existing = await cards.get_by_en(app_user.id, text)
     if existing:
         await show_duplicate(message, existing)
         await state.clear()
+        await delete_technical_input(message)
         return
 
     await state.update_data(pending_en=text)
@@ -243,6 +247,7 @@ async def add_card_input(
             reply_markup=kb.menu_only(),
         )
         await state.update_data(translation_flow_message_id=prompt.message_id)
+        await delete_technical_input(message)
         return
 
     thinking = await message.answer("Перевожу через OpenAI...")
@@ -263,6 +268,7 @@ async def add_card_input(
             "Не получилось перевести автоматически. Напиши перевод вручную.",
             reply_markup=kb.menu_only(),
         )
+        await delete_technical_input(message)
         return
 
     await log_usage(session, app_user.id, "translation", result.usage)
@@ -272,6 +278,7 @@ async def add_card_input(
         f"🇬🇧 <b>{e(text)}</b>\n🇷🇺 <b>{e(result.ru_text)}</b>\n\nСохранить такой перевод?",
         reply_markup=kb.translation_choice(),
     )
+    await delete_technical_input(message)
 
 
 @router.callback_query(F.data == "add:translation_ok")
@@ -303,6 +310,7 @@ async def add_ru_manual(message: Message, state: FSMContext) -> None:
         )
     else:
         await ask_association(message)
+    await delete_technical_input(message)
 
 
 async def ask_association(message: Message, edit: bool = False) -> None:
@@ -358,6 +366,7 @@ async def add_association_manual(
         clean_text(message.text or ""),
         edit_message_id=data.get("association_flow_message_id"),
     )
+    await delete_technical_input(message)
 
 
 @router.callback_query(F.data == "add:assoc_generate")
@@ -626,6 +635,7 @@ async def edit_ru_save(
     await CardRepository(session, fsrs).update_card(card, ru_text=message.text or "")
     await state.clear()
     await message.answer("✅ Перевод обновлен.\n\n" + format_card(card))
+    await delete_technical_input(message)
 
 
 @router.callback_query(F.data == "edit:assoc")
@@ -707,6 +717,7 @@ async def edit_assoc_save(
         association_text=association,
         edit_message_id=data.get("edit_association_message_id"),
     )
+    await delete_technical_input(message)
 
 
 @router.callback_query(F.data == "edit:assoc_generate")
@@ -923,7 +934,7 @@ async def show_review_mode_menu(message: Message, kind: str, edit: bool = False)
             "Рандом — случайные карточки без влияния на FSRS."
         )
     if edit:
-        await message.edit_text(text, reply_markup=kb.review_mode_menu(kind))
+        await safe_edit_text(message, text, reply_markup=kb.review_mode_menu(kind))
     else:
         await message.answer(text, reply_markup=kb.review_mode_menu(kind))
 
@@ -931,7 +942,7 @@ async def show_review_mode_menu(message: Message, kind: str, edit: bool = False)
 async def ask_review_size(message: Message, mode: str, edit: bool = False) -> None:
     text = review_size_text(mode)
     if edit:
-        await message.edit_text(text, reply_markup=kb.review_size(mode))
+        await safe_edit_text(message, text, reply_markup=kb.review_size(mode))
     else:
         await message.answer(text, reply_markup=kb.review_size(mode))
 
@@ -1000,26 +1011,31 @@ async def review_start(
     session: AsyncSession,
     app_user: User,
 ) -> None:
-    _, _, mode, limit_text = callback.data.split(":")
-    if mode not in REVIEW_MODES:
-        await callback.answer("Неизвестный режим", show_alert=True)
-        return
-    cards = await review_cards(session, app_user.id, mode, int(limit_text))
-    if not cards:
-        await callback.message.edit_text(
-            empty_review_text(mode),
-            reply_markup=kb.menu_only(),
+    async with review_lock_for(app_user.id):
+        if await state.get_state() == ReviewStates.reviewing.state:
+            await callback.answer("Повторение уже запущено")
+            return
+        _, _, mode, limit_text = callback.data.split(":")
+        if mode not in REVIEW_MODES:
+            await callback.answer("Неизвестный режим", show_alert=True)
+            return
+        cards = await review_cards(session, app_user.id, mode, int(limit_text))
+        if not cards:
+            await safe_edit_text(
+                callback.message,
+                empty_review_text(mode),
+                reply_markup=kb.menu_only(),
+            )
+            await callback.answer()
+            return
+        await state.set_state(ReviewStates.reviewing)
+        await state.update_data(
+            review_mode=mode,
+            review_queue=[card.id for card in cards],
+            review_index=0,
         )
-        await callback.answer()
-        return
-    await state.set_state(ReviewStates.reviewing)
-    await state.update_data(
-        review_mode=mode,
-        review_queue=[card.id for card in cards],
-        review_index=0,
-    )
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await send_review_front(callback.message, state, session, app_user)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await send_review_front(callback.message, state, session, app_user)
     await callback.answer()
 
 
@@ -1058,7 +1074,8 @@ async def review_show_answer(
     session: AsyncSession,
     app_user: User,
 ) -> None:
-    await show_review_answer(callback.message, state, session, app_user)
+    async with review_lock_for(app_user.id):
+        await show_review_answer(callback.message, state, session, app_user)
     await callback.answer()
 
 
@@ -1069,7 +1086,8 @@ async def review_show_answer_by_button(
     session: AsyncSession,
     app_user: User,
 ) -> None:
-    await show_review_answer(message, state, session, app_user)
+    async with review_lock_for(app_user.id):
+        await show_review_answer(message, state, session, app_user)
 
 
 async def show_review_answer(
@@ -1117,9 +1135,10 @@ async def review_rate(
     app_user: User,
 ) -> None:
     rating = callback.data.rsplit(":", 1)[1]
-    data = await state.get_data()
-    is_random = is_random_review_mode(str(data.get("review_mode", "")))
-    saved = await rate_review_card(callback.message, state, session, app_user, rating)
+    async with review_lock_for(app_user.id):
+        data = await state.get_data()
+        is_random = is_random_review_mode(str(data.get("review_mode", "")))
+        saved = await rate_review_card(callback.message, state, session, app_user, rating)
     await callback.answer("Оценка сохранена" if saved and not is_random else None)
 
 
@@ -1131,7 +1150,8 @@ async def review_rate_by_button(
     app_user: User,
 ) -> None:
     rating = kb.RATING_BUTTON_TO_KEY[message.text]
-    await rate_review_card(message, state, session, app_user, rating)
+    async with review_lock_for(app_user.id):
+        await rate_review_card(message, state, session, app_user, rating)
 
 
 async def rate_review_card(
@@ -1143,11 +1163,6 @@ async def rate_review_card(
 ) -> bool:
     data = await state.get_data()
     if data.get("review_stage") != "answer":
-        await message.answer(
-            "Сначала открой перевод.",
-            reply_markup=kb.review_show_answer_keyboard(),
-            disable_notification=True,
-        )
         return False
     if not data.get("current_card_id"):
         await state.clear()
@@ -1162,16 +1177,21 @@ async def rate_review_card(
         )
         return False
     mode = str(data["review_mode"])
-    if not is_random_review_mode(mode):
-        repo = CardRepository(session, fsrs)
-        await repo.review_card(
-            app_user,
-            card,
-            review_base_mode(mode),
-            rating,
-            desired_retention=app_user.fsrs_retention,
-        )
-        await session.commit()
+    await state.update_data(review_stage="rating")
+    try:
+        if not is_random_review_mode(mode):
+            repo = CardRepository(session, fsrs)
+            await repo.review_card(
+                app_user,
+                card,
+                review_base_mode(mode),
+                rating,
+                desired_retention=app_user.fsrs_retention,
+            )
+            await session.commit()
+    except Exception:
+        await state.update_data(review_stage="answer")
+        raise
     await state.update_data(review_index=int(data["review_index"]) + 1)
     await send_review_front(message, state, session, app_user)
     return True
@@ -1439,6 +1459,7 @@ async def dictionary_search_query(
         search_query=query,
         edit_message_id=data.get("dictionary_search_message_id"),
     )
+    await delete_technical_input(message)
 
 
 async def render_dictionary_page(
@@ -1535,8 +1556,10 @@ async def begin_import(message: Message, state: FSMContext, edit: bool = False) 
     )
     if edit:
         await message.edit_text(text, reply_markup=kb.menu_only())
+        await state.update_data(import_prompt_message_id=message.message_id)
     else:
-        await message.answer(text, reply_markup=kb.menu_only())
+        prompt = await message.answer(text, reply_markup=kb.menu_only())
+        await state.update_data(import_prompt_message_id=prompt.message_id)
 
 
 @router.message(ImportStates.waiting_text, F.document)
@@ -1556,12 +1579,14 @@ async def import_document(
     normalized_filename = filename.casefold()
     if not normalized_filename.endswith((".txt", ".xml", ".pdf")):
         await message.answer("Пока принимаю только файлы .xml, .pdf и .txt до 1 МБ.")
+        await delete_technical_input(message)
         return
     if document.file_size and document.file_size > settings.import_max_file_bytes:
         await message.answer(
             "Файл слишком большой для MVP-импорта. "
             f"Лимит: {settings.import_max_file_bytes / 1024 / 1024:.1f} МБ."
         )
+        await delete_technical_input(message)
         return
 
     buffer = BytesIO()
@@ -1578,6 +1603,7 @@ async def import_document(
         if is_admin:
             error_text += f"\n\nТехнически: <code>{e(short_error(exc))}</code>"
         await message.answer(error_text)
+        await delete_technical_input(message)
         return
 
     await process_import_text(
@@ -1623,6 +1649,7 @@ async def process_import_text(
 
     local_candidates = parse_local_import(text)
     if local_candidates is not None:
+        await delete_technical_input(message)
         await show_import_preview(
             message,
             state,
@@ -1636,6 +1663,7 @@ async def process_import_text(
     except RuntimeError:
         await state.clear()
         await message.answer("OpenAI API не настроен, импорт через LLM пока недоступен.")
+        await delete_technical_input(message)
         return
     thinking = await message.answer("Разбираю импорт через OpenAI...")
     chunks = split_import_text(
@@ -1667,20 +1695,23 @@ async def process_import_text(
         if is_admin:
             error_text += f"\n\nТехнически: <code>{e(short_error(exc))}</code>"
         await thinking.edit_text(error_text)
+        await delete_technical_input(message)
         return
 
     candidates = deduplicate_candidates(candidates)
     if not candidates:
         await state.clear()
         await thinking.edit_text("Не нашел карточек для импорта.")
+        await delete_technical_input(message)
         return
 
+    await delete_technical_input(thinking)
+    await delete_technical_input(message)
     await show_import_preview(
-        thinking,
+        message,
         state,
         candidates,
         source_note=f"Разобрал {source_label} через OpenAI пачками: {len(chunks)}.",
-        edit=True,
     )
 
 
@@ -1689,7 +1720,6 @@ async def show_import_preview(
     state: FSMContext,
     candidates: list[ImportCandidate],
     source_note: str,
-    edit: bool = False,
 ) -> None:
     settings = current_settings()
     preview_lines = []
@@ -1712,9 +1742,7 @@ async def show_import_preview(
         + hidden_text
         + "\n\n🤖 — перевод предложен моделью. Импортировать?"
     )
-    if edit:
-        await message.edit_text(text, reply_markup=kb.import_confirm())
-    else:
+    if not await edit_import_prompt(message, state, text, reply_markup=kb.import_confirm()):
         await message.answer(text, reply_markup=kb.import_confirm())
 
 
@@ -1775,6 +1803,7 @@ async def import_manual_pairs(
         pairs.append(pair)
     if not pairs:
         await message.answer("Не увидел пар. Формат: <code>word - перевод</code>")
+        await delete_technical_input(message)
         return
     repo = CardRepository(session, fsrs)
     created = 0
@@ -1789,6 +1818,7 @@ async def import_manual_pairs(
         format_import_result(created, skipped_items),
         reply_markup=kb.import_done_actions(),
     )
+    await delete_technical_input(message)
 
 
 @router.callback_query(F.data == "import:cancel")
@@ -2030,6 +2060,49 @@ def format_review_front(card: Card, mode: str) -> str:
 
 def format_review_card_text(index: int, total: int, body: str) -> str:
     return f"{index + 1}/{total}\n\n{body}"
+
+
+def review_lock_for(user_id: int) -> asyncio.Lock:
+    lock = REVIEW_LOCKS.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        REVIEW_LOCKS[user_id] = lock
+    return lock
+
+
+async def safe_edit_text(message: Message, text: str, reply_markup: object | None = None) -> None:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
+
+
+async def delete_technical_input(message: Message) -> None:
+    with suppress(TelegramAPIError):
+        await message.delete()
+
+
+async def edit_import_prompt(
+    message: Message,
+    state: FSMContext,
+    text: str,
+    reply_markup: object | None = None,
+) -> bool:
+    data = await state.get_data()
+    prompt_id = data.get("import_prompt_message_id")
+    if prompt_id is None:
+        return False
+    try:
+        await message.bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=int(prompt_id),
+            text=text,
+            reply_markup=reply_markup,
+        )
+    except (TelegramAPIError, TypeError, ValueError):
+        return False
+    return True
 
 
 def has_dictionary_return(data: dict[str, object]) -> bool:
